@@ -4,7 +4,7 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.Context
+import androidx.core.net.toUri
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -16,6 +16,7 @@ import android.media.session.MediaSession
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
+import androidx.car.app.connection.CarConnection
 import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -34,7 +35,7 @@ class GarageAutomationService : LifecycleService(), RecognitionListener {
     private lateinit var tts: TextToSpeech
     private lateinit var speechRecognizer: SpeechRecognizer
     private lateinit var mediaSession: MediaSession
-    private val toneGen = android.media.ToneGenerator(android.media.AudioManager.STREAM_VOICE_CALL, 100)
+    private val toneGen = android.media.ToneGenerator(AudioManager.STREAM_VOICE_CALL, 100)
 
     private var ttsReady = false
     private var hasAskedOnce = false
@@ -51,11 +52,25 @@ class GarageAutomationService : LifecycleService(), RecognitionListener {
 
     override fun onCreate() {
         super.onCreate()
-        val prefs = getSharedPreferences("GaragePrefs", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences("GaragePrefs", MODE_PRIVATE)
         langIndex = prefs.getInt("selected_lang", 0)
 
         setupNotificationChannel()
         setupMediaSession()
+
+        // --- Start of Android Auto Connection Integration ---
+        // Safety check: CarConnection works reliably on API 29+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            CarConnection(this).type.observe(this) { type ->
+                if (type != CarConnection.CONNECTION_TYPE_NOT_CONNECTED) {
+                    Log.d("Gatekeeper", "Android Auto Dashboard Active")
+                }
+            }
+        } else {
+            // For older APIs, we assume connected if the service is running via BT
+            Log.d("Gatekeeper", "Legacy API: Skipping CarConnection observer")
+        }
+        // --- End of Integration ---
 
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
         speechRecognizer.setRecognitionListener(this)
@@ -68,8 +83,8 @@ class GarageAutomationService : LifecycleService(), RecognitionListener {
                     else -> Locale.UK
                 }
                 tts.language = loc
-                tts.setSpeechRate(0.82f) // Human-like slow speed
-                tts.setPitch(0.75f)      // Bassy Lexus tone
+                tts.setSpeechRate(0.82f)
+                tts.setPitch(0.75f)
                 setupTTSListener()
                 requestAppAudioFocus()
 
@@ -83,7 +98,9 @@ class GarageAutomationService : LifecycleService(), RecognitionListener {
         }
 
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
         startForeground(1, createNotification("Gatekeeper Standby"), types)
     }
 
@@ -225,7 +242,11 @@ class GarageAutomationService : LifecycleService(), RecognitionListener {
     private fun dialGarage() {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
             try {
-                startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:$garagePhone")).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+                // Updated line 245:
+                startActivity(Intent(Intent.ACTION_CALL, "tel:$garagePhone".toUri()).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+
                 Handler(Looper.getMainLooper()).postDelayed({
                     val tm = getSystemService(TELECOM_SERVICE) as TelecomManager
                     if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
@@ -233,7 +254,9 @@ class GarageAutomationService : LifecycleService(), RecognitionListener {
                         releaseAudioFocus()
                     }
                 }, 1000)
-            } catch (e: Exception) { releaseAudioFocus() }
+            } catch (_: Exception) {
+                releaseAudioFocus()
+            }
         }
     }
 
@@ -274,7 +297,7 @@ class GarageAutomationService : LifecycleService(), RecognitionListener {
     private fun cleanupAndStop() {
         if (::fusedLocationClient.isInitialized) fusedLocationClient.removeLocationUpdates(locationCallback)
         updateStatusBroadcast(false)
-        try { speechRecognizer.destroy() } catch (e: Exception) {}
+        try { speechRecognizer.destroy() } catch (_: Exception) {}
         releaseAudioFocus()
         if (::tts.isInitialized) { tts.stop(); tts.shutdown() }
         toneGen.release(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
